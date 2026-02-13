@@ -11,6 +11,8 @@ import threading
 import subprocess
 import os
 from datetime import datetime
+import json
+import sys
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
@@ -22,6 +24,12 @@ class MongoDBBackupGUI:
         self.root.geometry("900x800")
         self.root.resizable(True, True)
         
+        # Determinar se rodando como script ou executável
+        if getattr(sys, 'frozen', False):
+            self.base_dir = os.path.dirname(sys.executable)
+        else:
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))
+            
         # Variáveis Backup
         self.backup_dir = tk.StringVar(value="C:\\backup\\mongodb")
         self.mongo_uri = tk.StringVar(value="mongodb://localhost:27017/")
@@ -36,6 +44,23 @@ class MongoDBBackupGUI:
         self.restore_em_andamento = False
         self.preservar_dados = tk.BooleanVar(value=True)
         
+        # Variáveis Agendamento
+        self.config_path = os.path.join(self.base_dir, "config.json")
+        self.agendamento_ativo = tk.BooleanVar(value=False)
+        self.modo_agendamento = tk.StringVar(value="semanal") # 'semanal' ou 'intervalo'
+        self.intervalo_minutos = tk.IntVar(value=30)
+        self.hora_backup = tk.StringVar(value="00:00")
+        self.dias_semana = {
+            "Segunda": tk.BooleanVar(value=False),
+            "Terça": tk.BooleanVar(value=False),
+            "Quarta": tk.BooleanVar(value=False),
+            "Quinta": tk.BooleanVar(value=False),
+            "Sexta": tk.BooleanVar(value=False),
+            "Sábado": tk.BooleanVar(value=False),
+            "Domingo": tk.BooleanVar(value=False)
+        }
+        
+        self.carregar_configuracoes()
         self.criar_interface()
         
     def criar_interface(self):
@@ -68,6 +93,11 @@ class MongoDBBackupGUI:
         aba_restore = ttk.Frame(notebook, padding="10")
         notebook.add(aba_restore, text="Restauração (Importar)")
         self.criar_aba_restore(aba_restore)
+        
+        # Aba de Agendamento
+        aba_agendamento = ttk.Frame(notebook, padding="10")
+        notebook.add(aba_agendamento, text="Agendamento Automático")
+        self.criar_aba_agendamento(aba_agendamento)
         
     def criar_aba_backup(self, parent):
         """Cria a interface da aba de backup"""
@@ -224,6 +254,187 @@ class MongoDBBackupGUI:
         self.log_restore("Selecione a pasta de backup e configure a URI do MongoDB de destino.")
         self.log_restore("Clique em 'Listar Bancos no Backup' para começar.\n")
         
+    def criar_aba_agendamento(self, parent):
+        """Cria a interface da aba de agendamento"""
+        parent.columnconfigure(0, weight=1)
+        
+        # Frame de status
+        status_frame = ttk.LabelFrame(parent, text="Status do Agendamento", padding="10")
+        status_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.lbl_status_agendamento = ttk.Label(status_frame, text="Agendamento desativado", 
+                                               font=("Arial", 10, "bold"), foreground="red")
+        self.lbl_status_agendamento.pack(side=tk.LEFT)
+        
+        # Frame de Modo de Agendamento
+        modo_frame = ttk.LabelFrame(parent, text="Modo de Agendamento", padding="10")
+        modo_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Radiobutton(modo_frame, text="Por Dias da Semana / Horário Fixo", 
+                        variable=self.modo_agendamento, value="semanal", 
+                        command=self.alternar_modo_ui).grid(row=0, column=0, sticky=tk.W)
+        ttk.Radiobutton(modo_frame, text="Por Intervalo de Tempo (A cada X minutos)", 
+                        variable=self.modo_agendamento, value="intervalo",
+                        command=self.alternar_modo_ui).grid(row=1, column=0, sticky=tk.W)
+        
+        # Frame de Horário (Semanal)
+        self.horario_frame = ttk.LabelFrame(parent, text="Configuração de Horário (Modo Semanal)", padding="10")
+        self.horario_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Label(self.horario_frame, text="Executar backup às (HH:MM):").pack(side=tk.LEFT, padx=(0, 10))
+        self.ent_hora = ttk.Entry(self.horario_frame, textvariable=self.hora_backup, width=10)
+        self.ent_hora.pack(side=tk.LEFT)
+        ttk.Label(self.horario_frame, text="Ex: 03:00, 23:30").pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Frame de Dias da Semana (Semanal)
+        self.dias_frame = ttk.LabelFrame(parent, text="Dias da Semana (Modo Semanal)", padding="10")
+        self.dias_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        for i, (dia, var) in enumerate(self.dias_semana.items()):
+            ttk.Checkbutton(self.dias_frame, text=dia, variable=var).grid(row=i//4, column=i%4, sticky=tk.W, padx=10, pady=5)
+            
+        # Frame de Intervalo (Intervalo)
+        self.intervalo_frame = ttk.LabelFrame(parent, text="Configuração de Intervalo", padding="10")
+        self.intervalo_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Label(self.intervalo_frame, text="Executar backup a cada (minutos):").pack(side=tk.LEFT, padx=(0, 10))
+        tk.Spinbox(self.intervalo_frame, from_=1, to=1440, textvariable=self.intervalo_minutos, width=10).pack(side=tk.LEFT)
+        ttk.Label(self.intervalo_frame, text="Ex: 30, 60, 120").pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Frame de Botões
+        acoes_frame = ttk.Frame(parent, padding="10")
+        acoes_frame.grid(row=5, column=0, sticky=(tk.W, tk.E))
+        
+        ttk.Button(acoes_frame, text="Salvar e Ativar Agendamento", 
+                  command=self.ativar_agendamento).pack(side=tk.LEFT, padx=5)
+        ttk.Button(acoes_frame, text="Remover Agendamento", 
+                  command=self.remover_agendamento).pack(side=tk.LEFT, padx=5)
+        
+        # Informações sobre o agendador
+        info_frame = ttk.Frame(parent, padding="10")
+        info_frame.grid(row=6, column=0, sticky=(tk.W, tk.E))
+        ttk.Label(info_frame, text="O agendamento utiliza o 'Agendador de Tarefas' do Windows.", 
+                 font=("Arial", 9, "italic")).pack(side=tk.LEFT)
+        
+        # Inicializar status e visibilidade
+        self.alternar_modo_ui()
+        self.atualizar_visual_agendamento()
+
+    def alternar_modo_ui(self):
+        """Alterna a visibilidade dos frames de acordo com o modo selecionado"""
+        if self.modo_agendamento.get() == "semanal":
+            self.horario_frame.grid()
+            self.dias_frame.grid()
+            self.intervalo_frame.grid_remove()
+        else:
+            self.horario_frame.grid_remove()
+            self.dias_frame.grid_remove()
+            self.intervalo_frame.grid()
+
+    def ativar_agendamento(self):
+        """Salva configurações e cria tarefa no Windows"""
+        self.salvar_configuracoes()
+        
+        # Caminhos para o agendamento
+        nome_tarefa = "MongoDB_Backup_Automatico"
+        
+        if getattr(sys, 'frozen', False):
+            # Se for executável, procuramos pelo exe do backup ou o próprio python
+            backup_exe = os.path.join(self.base_dir, "backup_mongodb.exe")
+            if os.path.exists(backup_exe):
+                comando_tr = f'"{backup_exe}"'
+            else:
+                # Fallback para o script caso o exe não exista mas o python sim
+                script_path = os.path.join(self.base_dir, "backup_mongodb.py")
+                comando_tr = f'python "{script_path}"'
+        else:
+            script_path = os.path.join(self.base_dir, "backup_mongodb.py")
+            python_exe = sys.executable
+            comando_tr = f'"{python_exe}" "{script_path}"'
+        
+        if self.modo_agendamento.get() == "semanal":
+            dias_selecionados = [dia for dia, var in self.dias_semana.items() if var.get()]
+            if not dias_selecionados:
+                messagebox.showwarning("Aviso", "Selecione pelo menos um dia da semana.")
+                return
+                
+            mapa_dias = {
+                "Segunda": "MON", "Terça": "TUE", "Quarta": "WED", 
+                "Quinta": "THU", "Sexta": "FRI", "Sábado": "SAT", "Domingo": "SUN"
+            }
+            
+            dias_cmd = ",".join([mapa_dias[dia] for dia in dias_selecionados])
+            hora = self.hora_backup.get()
+            
+            # Validar formato da hora
+            try:
+                datetime.strptime(hora, "%H:%M")
+            except ValueError:
+                messagebox.showerror("Erro", "Formato de hora inválido. Use HH:MM (ex: 03:00)")
+                return
+            
+            cmd = [
+                "schtasks", "/create", "/tn", nome_tarefa, 
+                "/tr", comando_tr, 
+                "/sc", "weekly", "/d", dias_cmd, 
+                "/st", hora, "/f"
+            ]
+            msg_sucesso = f"Agendamento Semanal configurado com sucesso!\nHorário: {hora}\nDias: {', '.join(dias_selecionados)}"
+        else:
+            # Modo Intervalo
+            minutos = self.intervalo_minutos.get()
+            if minutos < 1:
+                messagebox.showwarning("Aviso", "O intervalo deve ser de pelo menos 1 minuto.")
+                return
+                
+            cmd = [
+                "schtasks", "/create", "/tn", nome_tarefa, 
+                "/tr", comando_tr, 
+                "/sc", "minute", "/mo", str(minutos), "/f"
+            ]
+            msg_sucesso = f"Agendamento por Intervalo configurado com sucesso!\nExecutar a cada: {minutos} minutos."
+        
+        try:
+            resultado = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            self.agendamento_ativo.set(True)
+            self.salvar_configuracoes()
+            self.atualizar_visual_agendamento()
+            messagebox.showinfo("Sucesso", msg_sucesso)
+            self.log(f"Agendamento criado: {msg_sucesso}")
+        except subprocess.CalledProcessError as e:
+            self.log(f"Erro ao criar tarefa agendada: {e.stderr}")
+            messagebox.showerror("Erro", f"Erro ao configurar agendamento no Windows:\n{e.stderr}")
+
+    def remover_agendamento(self):
+        """Remove a tarefa do Windows"""
+        nome_tarefa = "MongoDB_Backup_Automatico"
+        cmd = ["schtasks", "/delete", "/tn", nome_tarefa, "/f"]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            self.agendamento_ativo.set(False)
+            self.salvar_configuracoes()
+            self.atualizar_visual_agendamento()
+            messagebox.showinfo("Sucesso", "Agendamento removido com sucesso.")
+            self.log("Agendamento removido do Windows.")
+        except subprocess.CalledProcessError as e:
+            # Se a tarefa não existir, apenas atualizamos o status local
+            if "não encontrada" in e.stderr or "not found" in e.stderr.lower():
+                self.agendamento_ativo.set(False)
+                self.salvar_configuracoes()
+                self.atualizar_visual_agendamento()
+                messagebox.showinfo("Info", "Nenhum agendamento encontrado no Windows.")
+            else:
+                self.log(f"Erro ao remover tarefa agendada: {e.stderr}")
+                messagebox.showerror("Erro", f"Erro ao remover agendamento:\n{e.stderr}")
+
+    def atualizar_visual_agendamento(self):
+        """Atualiza a label de status do agendamento"""
+        if self.agendamento_ativo.get():
+            self.lbl_status_agendamento.config(text="AGENDAMENTO ATIVO", foreground="green")
+        else:
+            self.lbl_status_agendamento.config(text="AGENDAMENTO DESATIVADO", foreground="red")
+        
     def log(self, mensagem):
         """Adiciona mensagem ao log"""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -252,6 +463,50 @@ class MongoDBBackupGUI:
         if pasta:
             self.pasta_backup_selecionada.set(pasta)
             self.log_restore(f"Pasta de backup selecionada: {pasta}")
+            self.salvar_configuracoes()
+
+    def carregar_configuracoes(self):
+        """Carrega configurações do arquivo config.json"""
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.backup_dir.set(config.get("backup_dir", "C:\\backup\\mongodb"))
+                    self.mongo_uri.set(config.get("mongo_uri", "mongodb://localhost:27017/"))
+                    self.restore_uri.set(config.get("restore_uri", "mongodb://localhost:27017/"))
+                    self.agendamento_ativo.set(config.get("agendamento_ativo", False))
+                    self.modo_agendamento.set(config.get("modo_agendamento", "semanal"))
+                    self.intervalo_minutos.set(config.get("intervalo_minutos", 30))
+                    self.hora_backup.set(config.get("hora_backup", "00:00"))
+                    
+                    dias_config = config.get("dias_semana", {})
+                    for dia, valor in dias_config.items():
+                        if dia in self.dias_semana:
+                            self.dias_semana[dia].set(valor)
+                return True
+            except Exception as e:
+                print(f"Erro ao carregar config.json: {e}")
+        return False
+
+    def salvar_configuracoes(self):
+        """Salva configurações no arquivo config.json"""
+        config = {
+            "backup_dir": self.backup_dir.get(),
+            "mongo_uri": self.mongo_uri.get(),
+            "restore_uri": self.restore_uri.get(),
+            "agendamento_ativo": self.agendamento_ativo.get(),
+            "modo_agendamento": self.modo_agendamento.get(),
+            "intervalo_minutos": self.intervalo_minutos.get(),
+            "hora_backup": self.hora_backup.get(),
+            "dias_semana": {dia: var.get() for dia, var in self.dias_semana.items()}
+        }
+        try:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            return True
+        except Exception as e:
+            self.log(f"Erro ao salvar configurações: {e}")
+            return False
             
     def testar_conexao_restore(self):
         """Testa a conexão com o MongoDB para restauração"""
@@ -274,9 +529,11 @@ class MongoDBBackupGUI:
         if diretorio:
             self.backup_dir.set(diretorio)
             self.log(f"Diretório de backup selecionado: {diretorio}")
+            self.salvar_configuracoes()
             
     def testar_conexao(self):
         """Testa a conexão com o MongoDB"""
+        self.salvar_configuracoes()
         self.log("Testando conexão com MongoDB...")
         uri = self.mongo_uri.get()
         

@@ -9,6 +9,7 @@ import subprocess
 import os
 import sys
 from datetime import datetime
+import json
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
@@ -83,11 +84,21 @@ class MongoDBBackup:
             pasta_banco = os.path.join(pasta_destino, nome_banco)
             os.makedirs(pasta_banco, exist_ok=True)
             
+            # Determinar caminho do mongodump
+            if getattr(sys, 'frozen', False):
+                base_dir = os.path.dirname(sys.executable)
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            mongodump_exe = os.path.join(base_dir, "mongodump.exe")
+            if not os.path.exists(mongodump_exe):
+                mongodump_exe = "mongodump" # Tenta usar do PATH
+                
             print(f"\nExportando banco '{nome_banco}'...")
             
             # Comando mongodump
             comando = [
-                "mongodump",
+                mongodump_exe,
                 "--db", nome_banco,
                 "--out", pasta_banco
             ]
@@ -169,11 +180,29 @@ class MongoDBBackup:
 
 def main():
     """Função principal"""
-    # Configurações (podem ser alteradas aqui)
+    # Valores padrão
     BACKUP_DIR = "C:\\backup\\mongodb"
     MONGO_URI = "mongodb://localhost:27017/"
     
-    # Verifica argumentos da linha de comando
+    # Determinar pasta base (compatível com executável)
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+    # Tenta carregar do config.json primeiro
+    config_path = os.path.join(base_dir, "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                BACKUP_DIR = config.get("backup_dir", BACKUP_DIR)
+                MONGO_URI = config.get("mongo_uri", MONGO_URI)
+                print(f"Configurações carregadas de {config_path}")
+        except Exception as e:
+            print(f"Aviso: Erro ao ler config.json: {e}. Usando padrões.")
+    
+    # Verifica argumentos da linha de comando (sobrescrevem o config.json se fornecidos)
     if len(sys.argv) > 1:
         BACKUP_DIR = sys.argv[1]
     if len(sys.argv) > 2:
